@@ -6,7 +6,7 @@
             $finish; \
         end
 
-module tb();
+module tb_perm();
     wire [63:0] x0, x1, x2, x3, x4;
     wire [7:0] c_r;
     assign x0 = 64'h0123456789abcdef;
@@ -24,4 +24,7 @@ module tb();
         #1
         `assert(x0_out, 64'h3c1748c9be2892ce)
     end
+endmodule
+
+module tb_ascon();
 endmodule
