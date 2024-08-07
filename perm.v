@@ -1,5 +1,3 @@
-`timescale 1ns / 1ps
-
 module ascon_p(
     input   [7:0] c_r,
     input  [63:0] x0_in,
