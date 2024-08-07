@@ -7,11 +7,14 @@ module ascon(
         // the data and control signals into those,
         // => 32 bits + control bits < 64 bits
         input wire [31:0] key,
-        input wire [31:0] key_valid,
+        input wire        key_valid,
         output wire       key_ready,
         input wire [31:0] nonce,
         input wire        nonce_valid,
         output wire       nonce_ready,
+        input wire [31:0] assoc,
+        input wire        assoc_valid,
+        output wire       assoc_ready,
         input wire [31:0] data_in,
         input wire  [3:0] data_in_type,
         input wire        data_in_valid,
@@ -22,7 +25,10 @@ module ascon(
         // is, because it can be either ciphertext + tag or plaintext + tag
         output reg  [3:0] data_out_type,
         output reg        data_out_valid,
-        output reg        data_out_last
+        output reg        data_out_last,
+        output reg [31:0] tag,
+        output reg        tag_valid
+
     );
     // mode
     localparam MODE_DEC = 0;
@@ -30,10 +36,8 @@ module ascon(
 
     // data types
     localparam TYPE_EMPTY  = 4'h0;
-    localparam TYPE_ASSOC  = 4'h1;
-    localparam TYPE_PLAIN  = 4'h2;
-    localparam TYPE_CIPHER = 4'h3;
-    localparam TYPE_TAG    = 4'h4;
+    localparam TYPE_PLAIN  = 4'h1;
+    localparam TYPE_CIPHER = 4'h2;
 
     // ascon parameters
     // a = 12
