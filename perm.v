@@ -20,7 +20,7 @@ module ascon_p(
     // Substitution layer
     assign t0_0 = x0_in ^ x4_in;
     assign t1_0 = x1_in;
-    assign t2_0 = (x2_in ^ c_r) ^ x1_in; // Add constant
+    assign t2_0 = x2_in ^ c_r ^ x1_in; // Add constant
     assign t3_0 = x3_in;
     assign t4_0 = x4_in ^ x3_in;
 

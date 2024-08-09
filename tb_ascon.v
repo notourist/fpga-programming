@@ -29,7 +29,7 @@ module tb_ascon();
     wire  [1:0] data_out_type;
     wire        data_out_valid;
     wire        data_out_last;
-    wire [31:0] tag;
+    wire [127:0] tag;
     wire        tag_valid;
 
     // Use named parameters because there are so many <.<
@@ -68,7 +68,7 @@ module tb_ascon();
     initial begin
         clk = 0;
         rst = 0;
-        mode = `MODE_DEC;
+        mode = `MODE_ENC;
         key_in = 0;
         key_valid = 0;
         nonce_in = 0;
@@ -85,28 +85,40 @@ module tb_ascon();
         #10
         // wait for key ready
         #10
-        key_in = 'ha;
+        key_in = 32'h0;
         #10
-        key_in = 'hb;
+        key_in = 32'h0;
         #10
-        key_in = 'hc;
+        key_in = 32'h0;
         #10
-        key_in = 'hd;
+        key_in = 32'h0;
         #10
         key_in = 0;
         key_valid = 0;
         nonce_valid = 1;
-        nonce_in = 'hc;
+        nonce_in = 'h0;
         #10
         // wait for nonce ready
         #10
-        nonce_in = 'hd;
+        nonce_in = 'h0;
         #10
-        nonce_in = 'he;
+        nonce_in = 'h0;
         #10
-        nonce_in = 'hf;
+        nonce_in = 'h0;
         #10
         nonce_valid = 0;
         nonce_in = 0;
+        #120
+        assoc_in = 'h0;
+        assoc_valid = 1;
+        #20
+        assoc_valid = 0;
+        #50
+        data_in_type = `TYPE_PLAIN;
+        data_in_valid = 1;
+        data_in = 'h6e000000;
+        #70
+        data_in = 'h6173636f;
+        data_in_last = 1;
     end
 endmodule
