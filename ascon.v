@@ -8,10 +8,6 @@
 `define INPUT_LENGTH 32
 `define MODE_DEC 0
 `define MODE_ENC 1
-// data types
-`define TYPE_EMPTY  0
-`define TYPE_PLAIN  1
-`define TYPE_CIPHER 2
 
 `define x4 ascon_state[(`X_SIZE - 1) : 0]
 `define x3 ascon_state[((`X_SIZE * 2) - 1) : `X_SIZE]
@@ -26,23 +22,11 @@ module ascon(
         input          clk,
         input          rst,
         input          mode,
-        // TODO: convert 31 to `INPUT_LENGTH - 1
-        input wire [31:0] key_in,
-        input wire        key_valid,
-        output reg        key_ready      = 0,
-        input wire [31:0] nonce_in,
-        input wire        nonce_valid,
-        output reg        nonce_ready    = 0,
-        input wire [31:0] assoc_in,
-        input wire        assoc_valid,
-        output reg        assoc_ready    = 0,
         input wire [31:0] data_in,
-        input wire  [1:0] data_in_type,
         input wire        data_in_valid,
         input wire        data_in_last,
         output reg        data_in_ready  = 0,
         output reg [31:0] data_out       = 0,        
-        output reg  [1:0] data_out_type  = 0,
         output reg        data_out_valid = 0,
         output reg        data_out_last  = 0,
         output reg [127:0] tag           = 0,
@@ -67,9 +51,14 @@ module ascon(
     localparam STATE_READ_KEY      = 1;
     localparam STATE_READ_NONCE    = 2;
     localparam STATE_INIT          = 3;
-    localparam STATE_PROCESS_ASSOC = 4;
-    localparam STATE_PROCESS_TEXT  = 5;
-    localparam STATE_FINAL         = 6;
+    // We need another state to add the key during initialization
+    // as we add the key after the init permutation.
+    // We differentiate between permutation and key addition
+    // in the same state with the control signals.
+    localparam STATE_ADD_KEY_INIT  = 4;
+    localparam STATE_PROCESS_ASSOC = 5;
+    localparam STATE_PROCESS_TEXT  = 6;
+    localparam STATE_FINAL         = 7;
 
     reg [3:0] state_machine;
     reg [3:0] next_state;
@@ -124,13 +113,14 @@ module ascon(
     wire dist_read_nonce      = (state_machine == STATE_READ_NONCE) & nonce_valid & nonce_ready & input_count < 4;
     wire dist_read_nonce_last = dist_read_nonce & (input_count == 3);
     wire dist_init            = (state_machine == STATE_INIT) & rounds != 0;
-    wire dist_init_add_key    = (state_machine == STATE_INIT) & rounds == 0;
+    wire dist_init_finished   = (state_machine == STATE_INIT) & rounds == 0;
+    wire dist_init_key_finish = state_machine == STATE_ADD_KEY_INIT & assoc_valid;
     wire dist_assoc           = state_machine == STATE_PROCESS_ASSOC;
-    wire dist_assoc_read      = dist_assoc & assoc_ready & assoc_valid & rounds == 0;
-    wire dist_assoc_perm      = dist_assoc & rounds != 0;
+    wire dist_assoc_read      = dist_assoc & assoc_ready & assoc_valid;
+    wire dist_assoc_perm      = dist_assoc & !assoc_valid & rounds != 0;
     wire dist_assoc_finished  = dist_assoc & !assoc_ready & !assoc_valid & rounds == 0;
     wire dist_text            = state_machine == STATE_PROCESS_TEXT;
-    wire dist_text_read       = dist_text & (data_in_type == `TYPE_PLAIN || data_in_type == `TYPE_CIPHER) & data_in_valid & data_in_ready & rounds == 0;
+    wire dist_text_read       = dist_text & data_in_valid & data_in_ready & rounds == 0;
     wire dist_text_perm       = dist_text & rounds != 0;
     wire dist_final           = state_machine == STATE_FINAL;
     wire dist_final_perm      = dist_final & rounds != 0;
@@ -155,9 +145,13 @@ module ascon(
         begin
             next_state = STATE_PROCESS_TEXT;
         end
-        if (dist_init_add_key)
+        if (dist_init_key_finish)
         begin
             next_state = STATE_PROCESS_ASSOC;
+        end
+        if (dist_init_finished)
+        begin
+            next_state = STATE_ADD_KEY_INIT;
         end
         if (dist_read_nonce_last)
         begin
@@ -209,7 +203,7 @@ module ascon(
         end
     end
 
-    // update ascon stuff (state, nonce or key)
+    // update ascon state, nonce or key
     always @(posedge clk)
     begin
         if (rst != 1)
@@ -232,11 +226,11 @@ module ascon(
             begin
                 `state_r <= `state_r ^ assoc_in;
             end
-            if (dist_init_add_key | dist_final)
+            if (state_machine == STATE_ADD_KEY_INIT)
             begin
-                `state_c <= `state_c ^ {256'h0, ascon_key};
+                `state_c <= `state_c ^ ascon_key;
             end
-            if (dist_init | dist_assoc_perm | dist_text_perm | dist_final_perm)
+            if (dist_init | dist_init_finished | dist_assoc_perm | dist_text_perm | dist_final_perm)
             begin
                 $display("c_r: %x\n", c_r);
                 $display("%x\n%x\n%x\n%x\n%x\n", `x0, `x1, `x2, `x3, `x4);
@@ -269,7 +263,6 @@ module ascon(
         assoc_ready = 0;
         data_in_ready = 0;
         data_out = 32'b0;
-        data_out_type = `TYPE_EMPTY;
         data_out_valid = 0;
         data_out_last = 0;
         tag = 0;
@@ -295,10 +288,8 @@ module ascon(
                     data_out_last = data_in_last;
                     if (mode == `MODE_DEC)
                     begin
-                        data_out_type = `TYPE_PLAIN;
                         data_out = `state_r ^ data_in;
                     end else begin
-                        data_out_type = `TYPE_CIPHER;
                         data_out = `state_r ^ data_in;
                     end
                 end
@@ -310,7 +301,7 @@ module ascon(
             STATE_PROCESS_ASSOC:
             begin
                 assoc_ready = 1;
-                if (dist_assoc_read | dist_assoc_perm)
+                if (dist_assoc_read)
                 begin
                     assoc_ready = 0;
                 end

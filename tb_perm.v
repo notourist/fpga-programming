@@ -10,12 +10,12 @@
 module tb_perm();
     wire [63:0] x0, x1, x2, x3, x4;
     wire [7:0] c_r;
-    assign x4 = 64'h0;
-    assign x1 = 64'h0;
-    assign x2 = 64'h0;
-    assign x3 = 64'h0;
-    assign x0 = 64'h80400c0600000000;
-    assign c_r = 'hf0;
+    assign x0 = 64'hb8dff46b8db421f8;
+    assign x1 = 64'hed0232a7c68ded74;
+    assign x2 = 64'h138a46b172b225f9;
+    assign x3 = 64'hfa8eaaaac685d26a;
+    assign x4 = 64'hf044217fbe57e755;
+    assign c_r = 'h96;
 
     wire [63:0] x0_out, x1_out, x2_out, x3_out, x4_out;
 
