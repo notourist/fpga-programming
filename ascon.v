@@ -1,82 +1,67 @@
 `include "perm.v" 
 
-`define X_SIZE 64 
-// We cannot use the full 64 bits, because we want to use
-// the GPIO pins and only have 64. We need to fit
-// the data and control signals into those,
-// => 32 bits + control bits < 64 bits
-`define INPUT_LENGTH 32
+`define BLOCK_LENGTH 64
+`define KEY_LENGTH 128
+`define STATE_LENGTH (`BLOCK_LENGTH * 5)
+`define ROUNDS_A 11
+`define ROUNDS_B 5
+`define IV 64'h80400c0600000000
+
 `define MODE_DEC 0
 `define MODE_ENC 1
 
-`define x4 ascon_state[(`X_SIZE - 1) : 0]
-`define x3 ascon_state[((`X_SIZE * 2) - 1) : `X_SIZE]
-`define x2 ascon_state[((`X_SIZE * 3) - 1) : ((`X_SIZE * 2))]
-`define x1 ascon_state[((`X_SIZE * 4) - 1) : ((`X_SIZE * 3))]
-`define x0 ascon_state[((`X_SIZE * 5) - 1) : ((`X_SIZE * 4))]
+`define x4 ascon_state[(`BLOCK_LENGTH - 1) : 0]
+`define x3 ascon_state[((`BLOCK_LENGTH * 2) - 1) : `BLOCK_LENGTH]
+`define x2 ascon_state[((`BLOCK_LENGTH * 3) - 1) : ((`BLOCK_LENGTH * 2))]
+`define x1 ascon_state[((`BLOCK_LENGTH * 4) - 1) : ((`BLOCK_LENGTH * 3))]
+`define x0 ascon_state[((`BLOCK_LENGTH * 5) - 1) : ((`BLOCK_LENGTH * 4))]
 
-`define state_r ascon_state[319:(319 - 64)]
-`define state_c ascon_state[(319 - 64):0]
+`define state_r ascon_state[(`STATE_LENGTH - 1):(`STATE_LENGTH - `BLOCK_LENGTH)]
+`define state_c ascon_state[(`STATE_LENGTH - 1 - `BLOCK_LENGTH):0]
 
 module ascon(
-        input          clk,
-        input          rst,
-        input          mode,
-        input wire [31:0] data_in,
-        input wire        data_in_valid,
-        input wire        data_in_last,
-        output reg        data_in_ready  = 0,
-        output reg [31:0] data_out       = 0,        
-        output reg        data_out_valid = 0,
-        output reg        data_out_last  = 0,
-        output reg [127:0] tag           = 0,
-        output reg        tag_valid      = 0
-
+        input wire                         clk,
+        input wire                         mode,
+        input wire [(`BLOCK_LENGTH - 1):0] block_in,
+        input wire                         block_in_valid,
+        input wire                         block_in_last,
+        output reg                         block_in_ready,
+        output reg [(`BLOCK_LENGTH - 1):0] block_out,        
+        output reg                         block_out_valid,
+        output reg                         block_out_last,
+        input wire                         block_out_ready
     );
 
-    // ascon parameters
-    // a = 12
-    // b = 6
-    // k = 128
-    // r = 64
-    localparam ROUNDS_A = 11;
-    localparam ROUNDS_B = 5;
-    localparam KEY_LENGTH = 128;
-    localparam DATA_LENGTH = 64;
-    // IV = k || r || a || b
-    localparam IV = 'h80400c06;
-
-    // state machine
-    localparam STATE_WAIT          = 0;
-    localparam STATE_READ_KEY      = 1;
-    localparam STATE_READ_NONCE    = 2;
-    localparam STATE_INIT          = 3;
-    // We need another state to add the key during initialization
-    // as we add the key after the init permutation.
-    // We differentiate between permutation and key addition
-    // in the same state with the control signals.
-    localparam STATE_ADD_KEY_INIT  = 4;
-    localparam STATE_PROCESS_ASSOC = 5;
-    localparam STATE_PROCESS_TEXT  = 6;
-    localparam STATE_FINAL         = 7;
+    localparam STATE_WAIT           = 0;
+    localparam STATE_READ_KEY_NONCE = 1;
+    localparam STATE_INIT_PERM      = 2;
+    localparam STATE_ADD_KEY        = 3;
+    localparam STATE_ASSOC_READ     = 4;
+    localparam STATE_ASSOC_PERM     = 5;
+    localparam STATE_ASSOC_SEP      = 6;
+    localparam STATE_TEXT_READ      = 7;
+    localparam STATE_TEXT_PERM      = 8;
+    localparam STATE_FINAL_KEY      = 9;
+    localparam STATE_FINAL_PERM     = 10;
+    localparam STATE_TAG_KEY        = 11;
+    localparam STATE_TAG            = 12;
 
     reg [3:0] state_machine;
-    reg [3:0] next_state;
 
+    reg  [(`STATE_LENGTH - 1):0] ascon_state;
+    reg      [`KEY_LENGTH - 1:0] ascon_key;
+    reg                    [2:0] ascon_block_count;
+    reg                    [7:0] ascon_rounds;
+    reg  [(`BLOCK_LENGTH - 1):0] ascon_partial_state;
+    reg                          ascon_last;
 
-    reg [319:0] ascon_state;
-    reg [127:0] ascon_key;
-    reg   [2:0] input_count;
-    reg   [7:0] rounds;
-    reg         is_last;
-
-    wire [7:0] c_r = (8'hf0 - ((8'd11 - rounds) * 8'h10) + (8'd11 - rounds));
-
-    wire [63:0] x0_p;
-    wire [63:0] x1_p;
-    wire [63:0] x2_p;
-    wire [63:0] x3_p;
-    wire [63:0] x4_p;
+    wire                   [7:0]  c_r = 
+        (8'hf0 - ((8'd11 - ascon_rounds) * 8'h10) + (8'd11 - ascon_rounds));
+    wire [(`BLOCK_LENGTH - 1):0] x0_p;
+    wire [(`BLOCK_LENGTH - 1):0] x1_p;
+    wire [(`BLOCK_LENGTH - 1):0] x2_p;
+    wire [(`BLOCK_LENGTH - 1):0] x3_p;
+    wire [(`BLOCK_LENGTH - 1):0] x4_p;
 
     ascon_p ascon_perm(
         .c_r(c_r),
@@ -92,228 +77,138 @@ module ascon(
         .x4_out(x4_p)
     );
 
+    wire do_work             = state_machine == STATE_WAIT & block_in_valid;
+    
+    wire read_key_nonce      = state_machine == STATE_READ_KEY_NONCE & block_in_valid & block_in_ready;
+    wire read_key_nonce_last = read_key_nonce & ascon_block_count == 0;
+
+    wire init_perm_last      = state_machine == STATE_INIT_PERM & ascon_rounds == 0;
+
+    wire read_text           = state_machine == STATE_TEXT_READ & block_in_valid & block_in_ready;
+    wire text_perm_last      = state_machine == STATE_TEXT_PERM & ascon_rounds == 0;
+
     initial begin
         state_machine <= STATE_WAIT;
-        next_state <= STATE_WAIT;
         ascon_state <= 0;
-        rounds <= 0;
+        ascon_partial_state <= 0;
         ascon_key <= 0;
-        input_count <= 0;
-        is_last <= 0;
+        ascon_block_count <= 0;
+        ascon_rounds <= 0;
     end
 
-    // We also need to differentiate between different states in states.
-    // But we will not the state machine for this, because this is too complicated
-    wire dist_wait           = state_machine == STATE_WAIT;
-    wire dist_wait_finish    = dist_wait & key_valid;
-    wire dist_read_key       = (state_machine == STATE_READ_KEY) & key_valid & key_ready & input_count < 4;
-    // Do not use state_machine == ..., this can fail as key_valid might not be set!
-    // We need to reuse the previous dist_read_key
-    wire dist_read_key_last   = dist_read_key & (input_count == 3);
-    wire dist_read_nonce      = (state_machine == STATE_READ_NONCE) & nonce_valid & nonce_ready & input_count < 4;
-    wire dist_read_nonce_last = dist_read_nonce & (input_count == 3);
-    wire dist_init            = (state_machine == STATE_INIT) & rounds != 0;
-    wire dist_init_finished   = (state_machine == STATE_INIT) & rounds == 0;
-    wire dist_init_key_finish = state_machine == STATE_ADD_KEY_INIT & assoc_valid;
-    wire dist_assoc           = state_machine == STATE_PROCESS_ASSOC;
-    wire dist_assoc_read      = dist_assoc & assoc_ready & assoc_valid;
-    wire dist_assoc_perm      = dist_assoc & !assoc_valid & rounds != 0;
-    wire dist_assoc_finished  = dist_assoc & !assoc_ready & !assoc_valid & rounds == 0;
-    wire dist_text            = state_machine == STATE_PROCESS_TEXT;
-    wire dist_text_read       = dist_text & data_in_valid & data_in_ready & rounds == 0;
-    wire dist_text_perm       = dist_text & rounds != 0;
-    wire dist_final           = state_machine == STATE_FINAL;
-    wire dist_final_perm      = dist_final & rounds != 0;
-    wire dist_final_tag       = dist_final & rounds == 0; 
-
-    // state machine transitions
-    always @(posedge clk)
-    begin
-        // We need to assign the current state
-        // because we want to stay in the current state
-        // if nothing happens/we aren't finished with the current state.
-        next_state = state_machine;
-        if (dist_final_tag)
+    always @(posedge clk) begin
+        state_machine <= state_machine;
+        if (text_perm_last)
         begin
-            next_state = STATE_WAIT;
+            state_machine <= STATE_TEXT_READ;
         end
-        if (dist_text_perm & is_last)
+        if (read_text)
         begin
-            next_state = STATE_FINAL;
+            if (ascon_last)
+            begin
+                state_machine <= STATE_FINAL_KEY;
+            end else begin
+                state_machine <= STATE_TEXT_PERM;
+            end
         end
-        if (dist_assoc_finished)
+        if (state_machine == STATE_ASSOC_SEP)
         begin
-            next_state = STATE_PROCESS_TEXT;
+            state_machine <= STATE_TEXT_READ;
         end
-        if (dist_init_key_finish)
+        if (state_machine == STATE_ADD_KEY)
         begin
-            next_state = STATE_PROCESS_ASSOC;
+            if (block_in_valid)
+            begin
+                state_machine <= STATE_ASSOC_READ;
+            end else begin
+                state_machine <= STATE_ASSOC_SEP;
+            end
         end
-        if (dist_init_finished)
+        if (init_perm_last)
         begin
-            next_state = STATE_ADD_KEY_INIT;
+            state_machine <= STATE_ADD_KEY;
         end
-        if (dist_read_nonce_last)
+        if (read_key_nonce_last)
         begin
-            next_state = STATE_INIT;
+            state_machine <= STATE_INIT_PERM;
         end
-        if (dist_read_key_last)
+        if (do_work)
         begin
-            next_state = STATE_READ_NONCE;
-        end
-        if (dist_wait_finish)
-        begin
-            next_state = STATE_READ_KEY;
+            state_machine <= STATE_READ_KEY_NONCE;
         end
     end
 
-    // apply next state in case we are not resetting
-    always @(posedge clk)
-    begin
-        if (rst)
-        begin   
-            state_machine <= STATE_WAIT;
-        end else begin
-            state_machine <= next_state;
+    // State updates
+    // DO NOT TOUCH ANYTHING BUT THE STATE VARIABLE --->!!!!FUTURE ME!!!<----
+    always @(posedge clk) begin
+        if (read_text)
+        begin
+            `state_r <= ascon_partial_state;
+        end
+        if (state_machine == STATE_ASSOC_SEP)
+        begin
+            ascon_state <= ascon_state ^ 1;
+        end
+        if (state_machine == STATE_ADD_KEY)
+        begin
+            ascon_state <= ascon_state ^ ascon_key;
+        end
+        if (state_machine == STATE_INIT_PERM | state_machine == STATE_TEXT_PERM)
+        begin
+            `x0 <= x0_p;
+            `x1 <= x1_p;
+            `x2 <= x2_p;
+            `x3 <= x3_p;
+            `x4 <= x4_p;
+        end
+        if (read_key_nonce)
+        begin
+            if (ascon_block_count >= 2)
+            begin
+                ascon_key[`BLOCK_LENGTH * (ascon_block_count - 2) +: `BLOCK_LENGTH] <= ascon_partial_state;
+            end
+            ascon_state[`BLOCK_LENGTH * ascon_block_count +: `BLOCK_LENGTH] <= ascon_partial_state;
+            ascon_block_count <= ascon_block_count - 1;
+        end
+        if (do_work)
+        begin
+            ascon_state <= `IV << 256;
+            ascon_block_count <= 3;
+        end
+
+        // Rounds
+        if (state_machine == STATE_INIT_PERM | state_machine == STATE_TEXT_PERM)
+        begin
+            ascon_rounds <= ascon_rounds - 1;
+        end
+        if (read_key_nonce_last)
+        begin
+            ascon_rounds <= `ROUNDS_A;
+        end
+        if (read_text)
+        begin
+            ascon_rounds <= `ROUNDS_B;
         end
     end
 
-    // update rounds and counter
-    always @(posedge clk)
-    begin
-        if (dist_read_key | dist_read_nonce)
+    always @(posedge clk) begin
+        block_in_ready = 0;
+        block_out = 0;
+        block_out_valid = 0;
+        block_out_last = 0;
+        if (state_machine == STATE_TEXT_READ)
         begin
-            input_count <= input_count + 1;
+            block_in_ready = 1;
+            ascon_partial_state = `state_r ^ block_in;
+            block_out_valid = 1;
+            block_out = ascon_partial_state;
+            block_out_last = block_in_last;
+            ascon_last = block_in_last;
         end
-        if (dist_read_key_last | dist_read_nonce_last)
+        if (state_machine == STATE_READ_KEY_NONCE)
         begin
-            input_count <= 0;
+            block_in_ready = 1;
+            ascon_partial_state = block_in;
         end
-        if (dist_assoc_read | dist_text_read)
-        begin
-            rounds <= ROUNDS_B;
-        end
-        if (dist_read_nonce_last | dist_final)
-        begin
-            rounds <= ROUNDS_A;
-        end
-        if (dist_init | dist_assoc_perm | (dist_text_perm & !is_last) | dist_final_perm)
-        begin
-            rounds <= rounds - 1;
-        end
-    end
-
-    // update ascon state, nonce or key
-    always @(posedge clk)
-    begin
-        if (rst != 1)
-        begin
-            if (dist_text_read)
-            begin
-                if (mode == `MODE_DEC)
-                begin
-                    `state_r <= data_in;
-                end else begin
-                    `state_r <= `state_r ^ data_in;
-                end
-                is_last <= data_in_last;
-            end
-            if (dist_assoc_finished)
-            begin
-                ascon_state <= ascon_state + 1;
-            end
-            if (dist_assoc_read)
-            begin
-                `state_r <= `state_r ^ assoc_in;
-            end
-            if (state_machine == STATE_ADD_KEY_INIT)
-            begin
-                `state_c <= `state_c ^ ascon_key;
-            end
-            if (dist_init | dist_init_finished | dist_assoc_perm | dist_text_perm | dist_final_perm)
-            begin
-                $display("c_r: %x\n", c_r);
-                $display("%x\n%x\n%x\n%x\n%x\n", `x0, `x1, `x2, `x3, `x4);
-                `x0 <= x0_p;
-                `x1 <= x1_p;
-                `x2 <= x2_p;
-                `x3 <= x3_p;
-                `x4 <= x4_p;
-            end
-            if (dist_read_nonce_last)
-            begin
-                ascon_state <= (IV << 288) | (ascon_key << 128) | ascon_state; 
-            end
-            if (dist_read_nonce)
-            begin
-                ascon_state[(input_count * `INPUT_LENGTH) +: `INPUT_LENGTH] <= nonce_in;
-            end
-            if (dist_read_key)
-            begin
-                ascon_key[(input_count * `INPUT_LENGTH) +: `INPUT_LENGTH] <= key_in;
-            end
-        end
-    end
-
-    // output updates
-    always @(posedge clk)
-    begin
-        key_ready = 0;
-        nonce_ready = 0;
-        assoc_ready = 0;
-        data_in_ready = 0;
-        data_out = 32'b0;
-        data_out_valid = 0;
-        data_out_last = 0;
-        tag = 0;
-        tag_valid = 0;
-        case (state_machine)
-            STATE_FINAL:
-            begin
-                if (dist_final_tag)
-                begin
-                    tag = ascon_state[127:0] ^ ascon_key;
-                    tag_valid = 1;
-                end
-            end
-            STATE_PROCESS_TEXT:
-            begin
-                data_in_ready = 1;
-                if (dist_text_read)
-                begin
-                    data_in_ready = 0;
-                    // I don't want to create another state so we will just 
-                    // hack this in here
-                    data_out_valid = 1;
-                    data_out_last = data_in_last;
-                    if (mode == `MODE_DEC)
-                    begin
-                        data_out = `state_r ^ data_in;
-                    end else begin
-                        data_out = `state_r ^ data_in;
-                    end
-                end
-                if (dist_text_perm)
-                begin
-                    data_in_ready = 0;
-                end
-            end
-            STATE_PROCESS_ASSOC:
-            begin
-                assoc_ready = 1;
-                if (dist_assoc_read)
-                begin
-                    assoc_ready = 0;
-                end
-            end
-            STATE_READ_KEY:
-            begin
-                key_ready = 1;
-            end
-            STATE_READ_NONCE:
-            begin
-                nonce_ready = 1;
-            end
-        endcase
     end
 endmodule
